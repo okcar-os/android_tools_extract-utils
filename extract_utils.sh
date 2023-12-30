@@ -1910,6 +1910,12 @@ function extract_firmware() {
     done
 }
 
+# function extract_img_data() {
+#     local image_file="$1"
+#     local out_dir="$2"
+#     sudo mount -o ro "$image_file" "$out_dir"
+# }
+
 function extract_img_data() {
     local image_file="$1"
     local out_dir="$2"
