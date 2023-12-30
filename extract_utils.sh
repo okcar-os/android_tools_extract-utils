@@ -1290,6 +1290,11 @@ function get_file() {
         cp -r "$SRC/$1"           "$2" 2>/dev/null && return 0
         cp -r "$SRC/${1#/system}" "$2" 2>/dev/null && return 0
         cp -r "$SRC/system/$1"    "$2" 2>/dev/null && return 0
+        # Lineage Rom specific
+        if [[ $1 == /system/odm/* ]]; then
+            new_string=${1/\/system\/odm\//\/vendor\/odm\/}
+            cp "$SRC/$new_string" "$2" 2>/dev/null && return 0
+        fi
 
         return 1
     fi
@@ -1793,6 +1798,7 @@ function extract() {
 
             if [ "${FOUND}" = false ]; then
                 colored_echo red "    !! ${BLOB_DISPLAY_NAME}: file not found in source"
+                exit 1
                 continue
             fi
 
