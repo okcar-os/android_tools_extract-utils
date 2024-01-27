@@ -21,11 +21,29 @@ COMMON=-1
 ARCHES=
 FULLY_DEODEXED=-1
 
+USE_MOUNT_EXTRACT=${USE_MOUNT_EXTRACT:-0}
 KEEP_DUMP=${KEEP_DUMP:-0}
 SKIP_CLEANUP=${SKIP_CLEANUP:-0}
 EXTRACT_TMP_DIR=$(mktemp -d)
 HOST="$(uname | tr '[:upper:]' '[:lower:]')"
 
+
+function unmount_recursive {
+    local dir=$1
+
+    sudo find "$dir" -mindepth 1 -type d | sort -r | while read -r subdir; do
+        if mountpoint -q "$subdir"; then
+            echo "Umounting: $subdir"
+            sudo umount "$subdir" || echo "Umount Failed: $subdir"
+            unmount_recursive "$subdir"
+        fi
+    done
+
+    if [ "$dir" != "$MOUNT_DIR" ] && mountpoint -q "$dir"; then
+        echo "Umounting: $dir"
+        sudo umount "$dir" || echo "Umount Failed: $dir"
+    fi
+}
 #
 # cleanup
 #
@@ -35,7 +53,12 @@ function cleanup() {
     if [ "$SKIP_CLEANUP" == "true" ] || [ "$SKIP_CLEANUP" == "1" ]; then
         echo "Skipping cleanup of $EXTRACT_TMP_DIR"
     else
-        rm -rf "${EXTRACT_TMP_DIR:?}"
+        if [ "$USE_MOUNT_EXTRACT" == "true" ] || [ "$USE_MOUNT_EXTRACT" == "1" ]; then
+            unmount_recursive $EXTRACT_TMP_DIR
+            rm -rf "${EXTRACT_TMP_DIR:?}"
+        else
+            rm -rf "${EXTRACT_TMP_DIR:?}"
+        fi
     fi
 }
 
@@ -1909,14 +1932,21 @@ function extract_firmware() {
         chmod 644 "$OUTPUT_DIR/$FILE"
     done
 }
-
-# function extract_img_data() {
-#     local image_file="$1"
-#     local out_dir="$2"
-#     sudo mount -o ro "$image_file" "$out_dir"
-# }
-
 function extract_img_data() {
+    if [ "$USE_MOUNT_EXTRACT" == "true" ] || [ "$USE_MOUNT_EXTRACT" == "1" ]; then
+        extract_img_data1 "$@"
+    else
+        extract_img_data2 "$@"
+    fi
+}
+
+function extract_img_data1() {
+    local image_file="$1"
+    local out_dir="$2"
+    sudo mount -o ro "$image_file" "$out_dir"
+}
+
+function extract_img_data2() {
     local image_file="$1"
     local out_dir="$2"
     local logFile="$EXTRACT_TMP_DIR/debugfs.log"
