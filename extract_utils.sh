@@ -12,6 +12,7 @@ PRODUCT_COPY_FILES_FIXUP_HASHES=()
 PRODUCT_PACKAGES_LIST=()
 PRODUCT_PACKAGES_HASHES=()
 PRODUCT_PACKAGES_FIXUP_HASHES=()
+PRODUCT_SYMLINKS_LIST=()
 PACKAGE_LIST=()
 EXTRACT_SRC=
 EXTRACT_STATE=-1
@@ -78,10 +79,13 @@ function setup_vendor_deps() {
     fi
 
     export BINARIES_LOCATION="$ANDROID_ROOT"/prebuilts/extract-tools/${HOST}-x86/bin
+    export CLANG_BINUTILS="$ANDROID_ROOT"/prebuilts/clang/host/${HOST}-x86/llvm-binutils-stable
 
     export SIMG2IMG="$BINARIES_LOCATION"/simg2img
     export LPUNPACK="$BINARIES_LOCATION"/lpunpack
+    export OTA_EXTRACTOR="$BINARIES_LOCATION"/ota_extractor
     export SIGSCAN="$BINARIES_LOCATION"/SigScan
+    export OBJDUMP="$CLANG_BINUTILS"/llvm-objdump
 
     for version in 0_8 0_9 0_17_2; do
         export PATCHELF_${version}="$BINARIES_LOCATION"/patchelf-"${version}"
@@ -237,17 +241,19 @@ function target_args() {
 #
 function prefix_match() {
     local PREFIX="$1"
+    local NEW_ARRAY=()
     for LINE in "${PRODUCT_PACKAGES_LIST[@]}"; do
         local FILE=$(target_file "$LINE")
         if [[ "$FILE" =~ ^"$PREFIX" ]]; then
             local ARGS=$(target_args "$LINE")
-            if [ -z "${ARGS}" ]; then
-                echo "${FILE#$PREFIX}"
+            if [[ -z "${ARGS}" || "${ARGS}" =~ 'SYMLINK' ]]; then
+                NEW_ARRAY+=("${FILE#$PREFIX}")
             else
-                echo "${FILE#$PREFIX};${ARGS}"
+                NEW_ARRAY+=("${FILE#$PREFIX};${ARGS}")
             fi
         fi
     done
+    printf '%s\n' "${NEW_ARRAY[@]}" | LC_ALL=C sort
 }
 
 #
@@ -423,6 +429,7 @@ function write_blueprint_packages() {
     local SRC=
     local STEM=
     local OVERRIDEPKG=
+    local DISABLE_CHECKELF=
 
     [ "$COMMON" -eq 1 ] && local VENDOR="${VENDOR_COMMON:-$VENDOR}"
 
@@ -443,10 +450,17 @@ function write_blueprint_packages() {
 
         # Allow overriding module name
         STEM=
+        if [ "$TARGET_ENABLE_CHECKELF" == "true" ]; then
+            DISABLE_CHECKELF=
+        else
+            DISABLE_CHECKELF="true"
+        fi
         for ARG in "${ARGS[@]}"; do
             if [[ "$ARG" =~ "MODULE" ]]; then
                 STEM="$PKGNAME"
                 PKGNAME=${ARG#*=}
+            elif [[ "$ARG" == "DISABLE_CHECKELF" ]]; then
+                DISABLE_CHECKELF="true"
             fi
         done
 
@@ -480,24 +494,44 @@ function write_blueprint_packages() {
             if [ "$EXTRA" = "both" ]; then
                 printf '\t\tandroid_arm: {\n'
                 printf '\t\t\tsrcs: ["%s/lib/%s"],\n' "$SRC" "$FILE"
+                if [ -z "$DISABLE_CHECKELF" ]; then
+                    printf '\t\t\tshared_libs: [%s],\n' "$(basename -s .so $(${OBJDUMP} -x "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/lib/"$FILE" 2>/dev/null |grep NEEDED) 2>/dev/null |grep -v ^NEEDED$ |sed 's/-3.9.1//g' |sed 's/\(.*\)/"\1",/g' |tr '\n' ' ')"
+                fi
                 printf '\t\t},\n'
                 printf '\t\tandroid_arm64: {\n'
                 printf '\t\t\tsrcs: ["%s/lib64/%s"],\n' "$SRC" "$FILE"
+                if [ -z "$DISABLE_CHECKELF" ]; then
+                    printf '\t\t\tshared_libs: [%s],\n' "$(basename -s .so $(${OBJDUMP} -x "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/lib64/"$FILE" 2>/dev/null |grep NEEDED) 2>/dev/null |grep -v ^NEEDED$ |sed 's/-3.9.1//g' |sed 's/\(.*\)/"\1",/g' |tr '\n' ' ')"
+                fi
                 printf '\t\t},\n'
             elif [ "$EXTRA" = "64" ]; then
                 printf '\t\tandroid_arm64: {\n'
                 printf '\t\t\tsrcs: ["%s/lib64/%s"],\n' "$SRC" "$FILE"
+                if [ -z "$DISABLE_CHECKELF" ]; then
+                    printf '\t\t\tshared_libs: [%s],\n' "$(basename -s .so $(${OBJDUMP} -x "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/lib64/"$FILE" 2>/dev/null |grep NEEDED) 2>/dev/null |grep -v ^NEEDED$ |sed 's/-3.9.1//g' |sed 's/\(.*\)/"\1",/g' |tr '\n' ' ')"
+                fi
                 printf '\t\t},\n'
             else
                 printf '\t\tandroid_arm: {\n'
                 printf '\t\t\tsrcs: ["%s/lib/%s"],\n' "$SRC" "$FILE"
+                if [ -z "$DISABLE_CHECKELF" ]; then
+                    printf '\t\t\tshared_libs: [%s],\n' "$(basename -s .so $(${OBJDUMP} -x "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/lib/"$FILE" 2>/dev/null |grep NEEDED) 2>/dev/null |grep -v ^NEEDED$ |sed 's/-3.9.1//g' |sed 's/\(.*\)/"\1",/g' |tr '\n' ' ')"
+                fi
                 printf '\t\t},\n'
             fi
             printf '\t},\n'
             if [ "$EXTRA" != "none" ]; then
                 printf '\tcompile_multilib: "%s",\n' "$EXTRA"
             fi
-            printf '\tcheck_elf_files: false,\n'
+            if [ ! -z "$DISABLE_CHECKELF" ]; then
+                printf '\tcheck_elf_files: false,\n'
+            fi
+        elif [ "$CLASS" = "RFSA" ]; then
+            printf 'prebuilt_rfsa {\n'
+            printf '\tname: "%s",\n' "$PKGNAME"
+            printf '\tfilename: "%s",\n' "$BASENAME"
+            printf '\towner: "%s",\n' "$VENDOR"
+            printf '\tsrc: "%s/lib/rfsa/%s",\n' "$SRC" "$FILE"
         elif [ "$CLASS" = "APEX" ]; then
             printf 'prebuilt_apex {\n'
             printf '\tname: "%s",\n' "$PKGNAME"
@@ -519,11 +553,14 @@ function write_blueprint_packages() {
             for ARG in "${ARGS[@]}"; do
                 if [ "$ARG" = "PRESIGNED" ]; then
                     USE_PLATFORM_CERTIFICATE="false"
+                    printf '\tpreprocessed: true,\n'
                     printf '\tpresigned: true,\n'
                 elif [[ "$ARG" =~ "OVERRIDES" ]]; then
                     OVERRIDEPKG=${ARG#*=}
                     OVERRIDEPKG=${OVERRIDEPKG//,/\", \"}
                     printf '\toverrides: ["%s"],\n' "$OVERRIDEPKG"
+                elif [[ "$ARG" =~ "SYMLINK" ]]; then
+                    continue
                 elif [ ! -z "$ARG" ]; then
                     USE_PLATFORM_CERTIFICATE="false"
                     printf '\tcertificate: "%s",\n' "$ARG"
@@ -548,6 +585,11 @@ function write_blueprint_packages() {
             printf '\tsrc: "%s/etc/%s",\n' "$SRC" "$FILE"
             printf '\tfilename_from_src: true,\n'
         elif [ "$CLASS" = "EXECUTABLES" ]; then
+            if ! objdump -a "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/bin/"$FILE" 2>/dev/null |grep -c 'file format elf' > /dev/null; then
+                # This is not an elf file, assume it's a shell script that doesn't have an extension
+                # Setting extension here does not change the target extension, only the module type
+                EXTENSION="sh"
+            fi
             if [ "$EXTENSION" = "sh" ]; then
                 printf 'sh_binary {\n'
             else
@@ -556,16 +598,34 @@ function write_blueprint_packages() {
             printf '\tname: "%s",\n' "$PKGNAME"
             printf '\towner: "%s",\n' "$VENDOR"
             if [ "$EXTENSION" != "sh" ]; then
-                printf '\tsrcs: ["%s/bin/%s"],\n' "$SRC" "$FILE"
-                printf '\tcheck_elf_files: false,\n'
+                printf '\ttarget: {\n'
+                if objdump -a "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/bin/"$FILE" |grep -c 'file format elf64' > /dev/null; then
+                    printf '\t\tandroid_arm64: {\n'
+                else
+                    printf '\t\tandroid_arm: {\n'
+                fi
+                printf '\t\t\tsrcs: ["%s/bin/%s"],\n' "$SRC" "$FILE"
+                if [ -z "$DISABLE_CHECKELF" ]; then
+                    printf '\t\t\tshared_libs: [%s],\n' "$(basename -s .so $(${OBJDUMP} -x "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/bin/"$FILE" 2>/dev/null |grep NEEDED) 2>/dev/null |grep -v ^NEEDED$ |sed 's/-3.9.1//g' |sed 's/\(.*\)/"\1",/g' |tr '\n' ' ')"
+                fi
+                printf '\t\t},\n'
+                printf '\t},\n'
+                if objdump -a "$ANDROID_ROOT"/"$OUTDIR"/"$SRC"/bin/"$FILE" |grep -c 'file format elf64' > /dev/null; then
+                    printf '\tcompile_multilib: "%s",\n' "64"
+                else
+                    printf '\tcompile_multilib: "%s",\n' "32"
+                fi
+                if [ ! -z "$DISABLE_CHECKELF" ]; then
+                    printf '\tcheck_elf_files: false,\n'
+                fi
                 printf '\tstrip: {\n'
                 printf '\t\tnone: true,\n'
                 printf '\t},\n'
                 printf '\tprefer: true,\n'
             else
                 printf '\tsrc: "%s/bin/%s",\n' "$SRC" "$FILE"
+                printf '\tfilename: "%s",\n' "$BASENAME"
             fi
-            unset EXTENSION
         else
             printf '\tsrcs: ["%s/%s"],\n' "$SRC" "$FILE"
         fi
@@ -574,9 +634,13 @@ function write_blueprint_packages() {
             printf '\t\tenabled: false,\n'
             printf '\t},\n'
         fi
-        if [ "$CLASS" = "SHARED_LIBRARIES" ] || [ "$CLASS" = "EXECUTABLES" ] ; then
+        if [ "$CLASS" = "SHARED_LIBRARIES" ] || [ "$CLASS" = "EXECUTABLES" ] || [ "$CLASS" = "RFSA" ] ; then
             if [ "$DIRNAME" != "." ]; then
-                printf '\trelative_install_path: "%s",\n' "$DIRNAME"
+                if [ "$EXTENSION" = "sh" ]; then
+                    printf '\tsub_dir: "%s",\n' "$DIRNAME"
+                else
+                    printf '\trelative_install_path: "%s",\n' "$DIRNAME"
+                fi
             fi
         fi
         if [ "$CLASS" = "ETC" ] ; then
@@ -659,8 +723,10 @@ function write_product_packages() {
 
     local T_V_LIB32=( $(prefix_match "vendor/lib/") )
     local T_V_LIB64=( $(prefix_match "vendor/lib64/") )
+    local V_RFSA=( $(prefix_match "vendor/lib/rfsa/") )
     local V_MULTILIBS=( $(LC_ALL=C comm -12 <(printf '%s\n' "${T_V_LIB32[@]}") <(printf '%s\n' "${T_V_LIB64[@]}")) )
     local V_LIB32=( $(LC_ALL=C comm -23 <(printf '%s\n' "${T_V_LIB32[@]}") <(printf '%s\n' "${V_MULTILIBS[@]}")) )
+    local V_LIB32=( $(LC_ALL=C grep -v 'rfsa/' <(printf '%s\n' "${V_LIB32[@]}")) )
     local V_LIB64=( $(LC_ALL=C comm -23 <(printf '%s\n' "${T_V_LIB64[@]}") <(printf '%s\n' "${V_MULTILIBS[@]}")) )
 
     if [ "${#V_MULTILIBS[@]}" -gt "0" ]; then
@@ -671,6 +737,9 @@ function write_product_packages() {
     fi
     if [ "${#V_LIB64[@]}" -gt "0" ]; then
         write_blueprint_packages "SHARED_LIBRARIES" "vendor" "64" "V_LIB64" >> "$ANDROIDBP"
+    fi
+    if [ "${#V_RFSA[@]}" -gt "0" ]; then
+        write_blueprint_packages "RFSA" "vendor" "" "V_RFSA" >> "$ANDROIDBP"
     fi
 
     local T_P_LIB32=( $(prefix_match "product/lib/") )
@@ -867,21 +936,80 @@ function write_product_packages() {
         write_blueprint_packages "EXECUTABLES" "odm" "" "O_BIN" >> "$ANDROIDBP"
     fi
 
-    # Actually write out the final PRODUCT_PACKAGES list
-    local PACKAGE_COUNT=${#PACKAGE_LIST[@]}
+    write_package_definition "${PACKAGE_LIST[@]}" >> "$PRODUCTMK"
+}
 
-    if [ "$PACKAGE_COUNT" -eq "0" ]; then
+
+#
+# write_symlink_packages:
+#
+# Creates symlink entries in the Android.bp and related PRODUCT_PACKAGES
+# list in the product makefile for all files in the blob list which has
+# SYMLINK argument.
+#
+function write_symlink_packages() {
+    local FILE=
+    local ARGS=
+    local ARCH=
+    local BASENAME=
+    local PKGNAME=
+    local PREFIX=
+    local SYMLINK_BASENAME=
+    local SYMLINK_PACKAGES=()
+
+    # Sort the symlinks list for comm
+    PRODUCT_SYMLINKS_LIST=($( printf '%s\n' "${PRODUCT_SYMLINKS_LIST[@]}" | LC_ALL=C sort))
+
+    local COUNT=${#PRODUCT_SYMLINKS_LIST[@]}
+
+    if [ "$COUNT" = "0" ]; then
         return 0
     fi
 
-    printf '\n%s\n' "PRODUCT_PACKAGES += \\" >> "$PRODUCTMK"
-    for (( i=1; i<PACKAGE_COUNT+1; i++ )); do
-        local LINEEND=" \\"
-        if [ "$i" -eq "$PACKAGE_COUNT" ]; then
-            LINEEND=""
+    for LINE in "${PRODUCT_SYMLINKS_LIST[@]}"; do
+        FILE=$(src_file "$LINE")
+        if [[ "$LINE" =~ '/lib/' ]]; then
+            ARCH="32"
+        elif [[ "$LINE" =~ '/lib64/' ]]; then
+            ARCH="64"
         fi
-        printf '    %s%s\n' "${PACKAGE_LIST[$i-1]}" "$LINEEND" >> "$PRODUCTMK"
+        BASENAME=$(basename "$FILE")
+        ARGS=$(target_args "$LINE")
+        ARGS=(${ARGS//;/ })
+        for ARG in "${ARGS[@]}"; do
+            if [[ "$ARG" =~ "SYMLINK" ]]; then
+                SYMLINKS=${ARG#*=}
+                SYMLINKS=(${SYMLINKS//,/ })
+                for SYMLINK in "${SYMLINKS[@]}"; do
+                    SYMLINK_BASENAME=$(basename "$SYMLINK")
+                    PKGNAME=${BASENAME%.*}_${SYMLINK_BASENAME%.*}_symlink${ARCH}
+                    {
+                        printf 'install_symlink {\n'
+                        printf '\tname: "%s",\n' "$PKGNAME"
+                        if prefix_match_file "vendor/" "$FILE"; then
+                            PREFIX='vendor/'
+                            printf '\tsoc_specific: true,\n'
+                        elif prefix_match_file "product/" "$FILE"; then
+                            PREFIX='product/'
+                            printf '\tproduct_specific: true,\n'
+                        elif prefix_match_file "system_ext/" "$FILE"; then
+                            PREFIX='system_ext/'
+                            printf '\tsystem_ext_specific: true,\n'
+                        elif prefix_match_file "odm/" "$FILE"; then
+                            PREFIX='odm/'
+                            printf '\tdevice_specific: true,\n'
+                        fi
+                        printf '\tinstalled_location: "%s",\n' "${SYMLINK#"$PREFIX"}"
+                        printf '\tsymlink_target: "/%s",\n' "$FILE"
+                        printf '}\n\n'
+                    } >> "$ANDROIDBP"
+                    SYMLINK_PACKAGES+=("$PKGNAME")
+                done
+            fi
+        done
     done
+
+    write_package_definition "${SYMLINK_PACKAGES[@]}" >> "$PRODUCTMK"
 }
 
 #
@@ -1095,6 +1223,31 @@ function write_rro_package() {
 }
 
 #
+# write_package_definition:
+#
+# $@: list of packages
+#
+# writes out the final PRODUCT_PACKAGES list
+#
+function write_package_definition() {
+    local PACKAGE_LIST=("${@}")
+    local PACKAGE_COUNT=${#PACKAGE_LIST[@]}
+
+    if [ "$PACKAGE_COUNT" -eq "0" ]; then
+        return 0
+    fi
+
+    printf '\n%s\n' "PRODUCT_PACKAGES += \\"
+    for (( i=1; i<PACKAGE_COUNT+1; i++ )); do
+        local LINEEND=" \\"
+        if [ "$i" -eq "$PACKAGE_COUNT" ]; then
+            LINEEND=""
+        fi
+        printf '    %s%s\n' "${PACKAGE_LIST[$i-1]}" "$LINEEND"
+    done
+}
+
+#
 # write_headers:
 #
 # $1: devices falling under common to be added to guard - optional
@@ -1138,6 +1291,18 @@ EOF
 
     cat << EOF >> "$ANDROIDBP"
 soong_namespace {
+	imports: [
+EOF
+
+    if [ ! -z "$DEVICE_COMMON" -a "$COMMON" -ne 1 ]; then
+        cat << EOF >> "$ANDROIDBP"
+		"vendor/${VENDOR_COMMON:-$VENDOR}/$DEVICE_COMMON",
+EOF
+    fi
+    vendor_imports "$ANDROIDBP"
+
+    cat << EOF >> "$ANDROIDBP"
+	],
 }
 
 EOF
@@ -1204,10 +1369,10 @@ function parse_file_list() {
         LIST=$1
     fi
 
-
     PRODUCT_PACKAGES_LIST=()
     PRODUCT_PACKAGES_HASHES=()
     PRODUCT_PACKAGES_FIXUP_HASHES=()
+    PRODUCT_SYMLINKS_LIST=()
     PRODUCT_COPY_FILES_LIST=()
     PRODUCT_COPY_FILES_HASHES=()
     PRODUCT_COPY_FILES_FIXUP_HASHES=()
@@ -1229,7 +1394,9 @@ function parse_file_list() {
         if [ "$COUNT" -gt "2" ]; then
             FIXUP_HASH=${SPLIT[2]}
         fi
-
+        if [[ "$SPEC" =~ 'SYMLINK=' ]]; then
+            PRODUCT_SYMLINKS_LIST+=("${SPEC#-}")
+        fi
         # if line starts with a dash, it needs to be packaged
         if [[ "$SPEC" =~ ^- ]]; then
             PRODUCT_PACKAGES_LIST+=("${SPEC#-}")
@@ -1239,6 +1406,10 @@ function parse_file_list() {
         elif suffix_match_file ".apex" "$(src_file "$SPEC")" || \
              suffix_match_file ".apk" "$(src_file "$SPEC")" || \
              suffix_match_file ".jar" "$(src_file "$SPEC")" || \
+             [[ "$TARGET_ENABLE_CHECKELF" == "true" && \
+                ( "${SPEC%%;*}" == *".so" || \
+                  "$SPEC" == *"bin/"* || \
+                  "$SPEC" == *"lib/rfsa"* ) ]] || \
              [[ "$SPEC" == *"etc/vintf/manifest/"* ]]; then
             PRODUCT_PACKAGES_LIST+=("$SPEC")
             PRODUCT_PACKAGES_HASHES+=("$HASH")
@@ -1258,34 +1429,54 @@ function parse_file_list() {
 # $1: file containing the list of items to extract
 # $2: make treble compatible makefile - optional
 #
-# Calls write_product_copy_files and write_product_packages on
-# the given file and appends to the Android.bp as well as
-# the product makefile.
+# Calls write_product_copy_files, write_product_packages and
+# lastly write_symlink_packages on the given file and appends
+# to the Android.bp as well as the product makefile.
 #
 function write_makefiles() {
     parse_file_list "$1"
     write_product_copy_files "$2"
     write_product_packages
+    write_symlink_packages
 }
 
 #
 # append_firmware_calls_to_makefiles:
 #
-# Appends to Android.mk the calls to all images present in radio folder
-# (filesmap file used by releasetools to map firmware images should be kept in the device tree)
+# $1: file containing the list of items to extract
+#
+# Appends the calls to all images present in radio folder to Android.mk
+# and radio AB_OTA_PARTITIONS to BoardConfigVendor.mk
 #
 function append_firmware_calls_to_makefiles() {
-    cat << EOF >> "$ANDROIDMK"
-ifeq (\$(LOCAL_PATH)/radio, \$(wildcard \$(LOCAL_PATH)/radio))
+    parse_file_list "$1"
 
-RADIO_FILES := \$(wildcard \$(LOCAL_PATH)/radio/*)
-\$(foreach f, \$(notdir \$(RADIO_FILES)), \\
-    \$(call add-radio-file,radio/\$(f)))
-\$(call add-radio-file,../../../device/$VENDOR/$DEVICE/radio/filesmap)
+    local FILELIST=(${PRODUCT_COPY_FILES_LIST[@]})
+    local COUNT=${#FILELIST[@]}
 
-endif
+    if [[ ${FILELIST[*]} =~ ";AB" ]]; then
+        printf '%s\n' "AB_OTA_PARTITIONS += \\" >> "$BOARDMK"
+    fi
 
-EOF
+    for (( i=1; i<COUNT+1; i++ )); do
+        local DST_FILE=$(target_file "${FILELIST[$i-1]}")
+        local ARGS=$(target_args "${FILELIST[$i-1]}")
+        local SHA1=$(get_hash "$ANDROID_ROOT"/"$OUTDIR"/radio/"$DST_FILE")
+        DST_FILE_NAME=(${DST_FILE//.img/ })
+        ARGS=(${ARGS//;/ })
+        LINEEND=" \\"
+        if [ "$i" -eq "$COUNT" ]; then
+            LINEEND=""
+        fi
+
+        for ARG in "${ARGS[@]}"; do
+            if [[ "$ARG" =~ "AB" ]]; then
+                printf '    %s%s\n' "$DST_FILE_NAME" "$LINEEND" >> "$BOARDMK"
+            fi
+        done
+        printf '%s\n' "\$(call add-radio-file-sha1-checked,radio/$DST_FILE,$SHA1)" >> "$ANDROIDMK"
+    done
+    printf '\n' >> "$ANDROIDMK"
 }
 
 #
@@ -1318,6 +1509,9 @@ function get_file() {
             new_string=${1/\/system\/odm\//\/vendor\/odm\/}
             cp "$SRC/$new_string" "$2" 2>/dev/null && return 0
         fi
+
+        # try /vendor/odm for devices without /odm partition
+        [[ "$1" == /system/odm/* ]] && cp -r "$SRC/vendor/${1#/system}" "$2" 2>/dev/null && return 0
 
         return 1
     fi
@@ -1539,6 +1733,14 @@ function blob_fixup() {
     :
 }
 
+# To be overridden by device-level extract-files.sh
+# Parameters:
+#   $1: Path to vendor Android.bp
+#
+function vendor_imports() {
+    :
+}
+
 #
 # prepare_images:
 #
@@ -1551,7 +1753,14 @@ function prepare_images() {
     local KEEP_DUMP_DIR="$SRC"
 
     if [ -f "$SRC" ] && [ "${SRC##*.}" == "zip" ]; then
+        local BASENAME=$(basename "$SRC")
+        local DIRNAME=$(dirname "$SRC")
         DUMPDIR="$EXTRACT_TMP_DIR"/system_dump
+        KEEP_DUMP_DIR="$DIRNAME"/"${BASENAME%.zip}"
+        if [ "$KEEP_DUMP" == "true" ] || [ "$KEEP_DUMP" == "1" ]; then
+            rm -rf "$KEEP_DUMP_DIR"
+            mkdir "$KEEP_DUMP_DIR"
+        fi
 
         # Check if we're working with the same zip that was passed last time.
         # If so, let's just use what's already extracted.
@@ -1566,7 +1775,11 @@ function prepare_images() {
 
             # Extract A/B OTA
             if [ -a "$DUMPDIR"/payload.bin ]; then
-                python3 "$ANDROID_ROOT"/tools/extract-utils/extract_ota.py "$DUMPDIR"/payload.bin -o "$DUMPDIR" -p "system" "odm" "product" "system_ext" "vendor" 2>&1
+                for PARTITION in "system" "odm" "product" "system_ext" "vendor"
+                do
+                    "$OTA_EXTRACTOR" --payload "$DUMPDIR"/payload.bin --output_dir "$DUMPDIR" --partitions "$PARTITION" &2>&1
+                done
+                wait
             fi
 
             for PARTITION in "system" "odm" "product" "system_ext" "vendor"
@@ -1589,11 +1802,6 @@ function prepare_images() {
                     extract_img_data "$DUMPDIR"/"$PARTITION".img "$DUMPDIR"/"$PARTITION"/
                 fi
             done
-        fi
-
-        if [ "$KEEP_DUMP" == "true" ] || [ "$KEEP_DUMP" == "1" ]; then
-            rm -rf "$KEEP_DUMP_DIR"/system_dump
-            cp -a "$DUMPDIR" "$KEEP_DUMP_DIR"/system_dump
         fi
 
         SRC="$DUMPDIR"
@@ -1642,7 +1850,9 @@ function prepare_images() {
             echo "Extracting "$PARTITION""
             local IMAGE="$SRC"/"$PARTITION".img
             if [ -f "$IMAGE" ]; then
-                if [[ $(file -b "$IMAGE") == Linux* ]]; then
+                if [[ $(file -b "$IMAGE") == EROFS* ]]; then
+                    fsck.erofs --extract="$DUMPDIR"/"$PARTITION" "$IMAGE"
+                elif [[ $(file -b "$IMAGE") == Linux* ]]; then
                     extract_img_data "$IMAGE" "$DUMPDIR"/"$PARTITION"
                 elif [[ $(file -b "$IMAGE") == Android* ]]; then
                     "$SIMG2IMG" "$IMAGE" "$DUMPDIR"/"$PARTITION".raw
@@ -1892,6 +2102,13 @@ function extract_carriersettings() {
 }
 
 #
+# To be overridden by device-level extract-files.sh
+#
+function prepare_firmware() {
+    :
+}
+
+#
 # extract_firmware:
 #
 # $1: file containing the list of items to extract
@@ -1921,15 +2138,60 @@ function extract_firmware() {
 
     echo "Extracting $COUNT files in $1 from $SRC:"
 
+    prepare_firmware
+
     for (( i=1; i<COUNT+1; i++ )); do
-        local FILE="${FILELIST[$i-1]}"
-        printf '  - %s \n' "/radio/$FILE"
+        local SRC_FILE=$(src_file "${FILELIST[$i-1]}")
+        local DST_FILE=$(target_file "${FILELIST[$i-1]}")
+        local COPY_FILE=
+
+        printf '  - %s \n' "radio/$DST_FILE"
 
         if [ ! -d "$OUTPUT_DIR" ]; then
             mkdir -p "$OUTPUT_DIR"
         fi
-        cp "$SRC/$FILE" "$OUTPUT_DIR/$FILE"
-        chmod 644 "$OUTPUT_DIR/$FILE"
+        if [ "$SRC" = "adb" ]; then
+            local PARTITION="${DST_FILE%.*}"
+
+            if [[ "${FILELIST[$i-1]}" == *\;AB ]]; then
+                local SLOT=$(adb shell getprop ro.boot.slot_suffix | rev | cut -c1)
+                PARTITION="${PARTITION}_${SLOT}"
+            fi
+
+            if adb pull "/dev/block/by-name/${PARTITION}" "$OUTPUT_DIR/$DST_FILE"; then
+                chmod 644 "$OUTPUT_DIR/$DST_FILE"
+            else
+                colored_echo yellow "${DST_FILE} not found, skipping copy"
+            fi
+
+            continue
+        fi
+        if [ -f "$SRC" ] && [ "${SRC##*.}" == "zip" ]; then
+            # Extract A/B OTA
+            if [ -a "$DUMPDIR"/payload.bin ]; then
+                "$OTA_EXTRACTOR" --payload "$DUMPDIR"/payload.bin --output_dir "$DUMPDIR" --partitions $(basename "${DST_FILE%.*}") 2>&1
+                if [ -f "$DUMPDIR/$(basename $DST_FILE)" ]; then
+                    COPY_FILE="$DUMPDIR/$(basename $DST_FILE)"
+                fi
+            fi
+        else
+            if [ -f "$SRC/$SRC_FILE" ]; then
+                COPY_FILE="$SRC/$SRC_FILE"
+            elif [ -f "$SRC/$DST_FILE" ]; then
+                COPY_FILE="$SRC/$DST_FILE"
+            fi
+            if [[ $(file -b "$COPY_FILE") == Android* ]]; then
+                "$SIMG2IMG" "$COPY_FILE" "$SRC"/"$(basename "$COPY_FILE").raw"
+                COPY_FILE="$SRC"/"$(basename "$COPY_FILE").raw"
+            fi
+        fi
+
+        if [ -f "$COPY_FILE" ]; then
+            cp "$COPY_FILE" "$OUTPUT_DIR/$DST_FILE"
+            chmod 644 "$OUTPUT_DIR/$DST_FILE"
+        else
+            colored_echo yellow "${DST_FILE} not found, skipping copy"
+        fi
     done
 }
 function extract_img_data() {
@@ -1995,7 +2257,9 @@ function generate_prop_list_from_image() {
 
     mkdir -p "$image_dir"
 
-    if [[ $(file -b "$image_file") == Linux* ]]; then
+    if [[ $(file -b "$image_file") == EROFS* ]]; then
+        fsck.erofs --extract="$image_dir" "$image_file"
+    elif [[ $(file -b "$image_file") == Linux* ]]; then
         extract_img_data "$image_file" "$image_dir"
     elif [[ $(file -b "$image_file") == Android* ]]; then
         "$SIMG2IMG" "$image_file" "$image_dir"/"$(basename "$image_file").raw"
